@@ -1,0 +1,192 @@
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Mail Merge')
+      .addItem('Crear Meet', 'crearMeet')
+      .addItem('Enviar Correspondencia', 'correspondencia')
+      .addToUi();
+}
+
+function agregarContacto(){
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName("People");
+  var last_row = sheet.getLastRow();
+  var data = sheet.getRange("A2:F" + last_row).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var nombre = data[i][0];
+    var apellido = data[i][1];
+    var correo = data[i][2];
+    var tipo = data[i][4];
+
+    var people = People.People.createContact(
+      {
+        "names" : [
+          {
+            "givenName": nombre,
+            "familyName" : apellido
+          }
+        ],
+        "emailAddresses" :[
+          {
+            "type" : tipo,
+            "value": correo
+          }
+        ]
+      }
+    )
+  }
+}
+
+function crearMeet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("GoogleCalender");
+  var last_row = sheet.getLastRow();
+  var data = sheet.getRange("A2:F" + last_row).getValues();
+  var cal = CalendarApp.getCalendarById("deislersaidpros@ufps.edu.co");
+
+  for (var i = 0; i < data.length; i++) {
+    var event_name = data[i][0];
+    var start_time = data[i][1];
+    var end_time = data[i][2];
+    var des = data[i][4];
+    var location = data[i][3];
+    var attendess = data[i][5];
+
+    const gmt = "-05:00";
+    var cal_id = "deislersaidpros@ufps.edu.co";
+    const resource = {
+      start: { dateTime: start_time + gmt },
+      end: { dateTime: end_time + gmt },
+      attendees: [{ email: attendess }],
+      conferenceData: {
+        createRequest: {
+          requestId: "deislersaidpros@ufps.edu.co",
+          conferenceSolutionKey: { type: "hangoutsMeet" },
+        },
+      },
+      summary: event_name,
+      description: des, // Corrected the typo here
+    };
+
+    const res = Calendar.Events.insert(resource, cal_id, {
+      conferenceDataVersion: 1,
+    });
+
+    Logger.log("Se insertaron los eventos correctamente");
+  }
+}
+
+
+
+const RECIPIENT_COL  = "Email";
+const EMAIL_SENT_COL = "Fecha Envio";
+function correspondencia(subjectLine, sheet=SpreadsheetApp.getActiveSheet()) {
+  if (!subjectLine){
+    subjectLine = Browser.inputBox("Mail Merge", 
+                                      "Correspondencia masiva" +
+                                      "Un gusto saludarte",
+                                      Browser.Buttons.OK_CANCEL);
+                                      
+    if (subjectLine === "cancel" || subjectLine == ""){ 
+    return;
+    }
+  }
+  const emailTemplate = getGmailTemplateFromDrafts_(subjectLine);
+  const dataRange = sheet.getDataRange();
+  const data = dataRange.getDisplayValues();
+
+  // Assumes row 1 contains our column headings
+  const heads = data.shift(); 
+  const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
+  const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
+
+  // Creates an array to record sent emails
+  const out = [];
+  obj.forEach(function(row, rowIdx){
+    if (row[EMAIL_SENT_COL] == ''){
+      try {
+        const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
+        GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+          htmlBody: msgObj.html,
+          attachments: emailTemplate.attachments,
+          inlineImages: emailTemplate.inlineImages
+        });
+        // Edits cell to record email sent date
+        out.push([new Date()]);
+      } catch(e) {
+        // modify cell to record error
+        out.push([e.message]);
+      }
+    } else {
+      out.push([row[EMAIL_SENT_COL]]);
+    }
+  });
+  
+  // Updates the sheet with new data
+  sheet.getRange(2, emailSentColIdx+1, out.length).setValues(out);
+  
+  function getGmailTemplateFromDrafts_(subject_line){
+    try {
+      // get drafts
+      const drafts = GmailApp.getDrafts();
+      // filter the drafts that match subject line
+      const draft = drafts.filter(subjectFilter_(subject_line))[0];
+      // get the message object
+      const msg = draft.getMessage();
+
+      // Handles inline images and attachments so they can be included in the merge
+      // Based on https://stackoverflow.com/a/65813881/1027723
+      // Gets all attachments and inline image attachments
+      const allInlineImages = draft.getMessage().getAttachments({includeInlineImages: true,includeAttachments:false});
+      const attachments = draft.getMessage().getAttachments({includeInlineImages: false});
+      const htmlBody = msg.getBody(); 
+
+      // Creates an inline image object with the image name as key 
+      // (can't rely on image index as array based on insert order)
+      const img_obj = allInlineImages.reduce((obj, i) => (obj[i.getName()] = i, obj) ,{});
+
+      //Regexp searches for all img string positions with cid
+      const imgexp = RegExp('<img.*?src="cid:(.*?)".*?alt="(.*?)"[^\>]+>', 'g');
+      const matches = [...htmlBody.matchAll(imgexp)];
+
+      //Initiates the allInlineImages object
+      const inlineImagesObj = {};
+      // built an inlineImagesObj from inline image matches
+      matches.forEach(match => inlineImagesObj[match[1]] = img_obj[match[2]]);
+
+      return {message: {subject: subject_line, text: msg.getPlainBody(), html:htmlBody}, 
+              attachments: attachments, inlineImages: inlineImagesObj };
+    } catch(e) {
+      throw new Error("Oops - can't find Gmail draft");
+    }
+    function subjectFilter_(subject_line){
+      return function(element) {
+        if (element.getMessage().getSubject() === subject_line) {
+          return element;
+        }
+      }
+    }
+  }
+  
+  function fillInTemplateFromObject_(template, data) {
+    // We have two templates one for plain text and the html body
+    // Stringifing the object means we can do a global replace
+    let template_string = JSON.stringify(template);
+
+    // Token replacement
+    template_string = template_string.replace(/{{[^{}]+}}/g, key => {
+      return escapeData_(data[key.replace(/[{}]+/g, "")] || "");
+    });
+    return  JSON.parse(template_string);
+  }
+  function escapeData_(str) {
+    return str
+      .replace(/[\\]/g, '\\\\')
+      .replace(/[\"]/g, '\\\"')
+      .replace(/[\/]/g, '\\/')
+      .replace(/[\b]/g, '\\b')
+      .replace(/[\f]/g, '\\f')
+      .replace(/[\n]/g, '\\n')
+      .replace(/[\r]/g, '\\r')
+      .replace(/[\t]/g, '\\t');
+  };
+}
